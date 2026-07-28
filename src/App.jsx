@@ -269,10 +269,10 @@ export default function CallIntelligence() {
   }
 
   function relabelSpeaker(rawLabel, newName) {
-    const updatedMap = { ...speakerMap, [rawLabel]: newName };
-    setSpeakerMap(updatedMap);
+    const currentLabel = speakerMap[rawLabel] || rawLabel;
+    setSpeakerMap((prev) => ({ ...prev, [rawLabel]: newName }));
     setTranscript((prev) => {
-      const pattern = new RegExp(`^${rawLabel}:`, "gm");
+      const pattern = new RegExp(`^${currentLabel}:`, "gm");
       return prev.replace(pattern, `${newName}:`);
     });
   }
@@ -486,30 +486,38 @@ ${transcript}`;
           </div>
 
           {detectedSpeakers.length > 0 && (
-            <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
               <span style={{ display: "flex", alignItems: "center", gap: 5, fontFamily: "'Inter', sans-serif", fontSize: 11, color: MUTED }}>
-                <Users size={13} /> {detectedSpeakers.length} speaker{detectedSpeakers.length > 1 ? "s" : ""} detected — label them:
+                <Users size={13} /> {detectedSpeakers.length} speaker{detectedSpeakers.length > 1 ? "s" : ""} detected — type a name/role for each, then press Enter:
               </span>
-              {detectedSpeakers.map((rawLabel) => (
-                <div key={rawLabel} style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: MUTED }}>{rawLabel}:</span>
-                  {["CSM", "Client"].map((name) => (
-                    <button
-                      key={name}
-                      onClick={() => relabelSpeaker(rawLabel, name)}
-                      style={{
-                        fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 600, cursor: "pointer",
-                        padding: "4px 10px", borderRadius: 20,
-                        border: speakerMap[rawLabel] === name ? `1px solid ${sector.accent}` : `1px solid ${BORDER}`,
-                        background: speakerMap[rawLabel] === name ? `${sector.accent}25` : "transparent",
-                        color: speakerMap[rawLabel] === name ? TXT : MUTED,
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                {detectedSpeakers.map((rawLabel) => (
+                  <div key={rawLabel} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: MUTED }}>{rawLabel}:</span>
+                    <input
+                      type="text"
+                      placeholder="e.g. CSM, Client, IT Director…"
+                      defaultValue={speakerMap[rawLabel] || ""}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && e.currentTarget.value.trim()) {
+                          relabelSpeaker(rawLabel, e.currentTarget.value.trim());
+                          e.currentTarget.blur();
+                        }
                       }}
-                    >
-                      {name}
-                    </button>
-                  ))}
-                </div>
-              ))}
+                      onBlur={(e) => {
+                        if (e.currentTarget.value.trim()) relabelSpeaker(rawLabel, e.currentTarget.value.trim());
+                      }}
+                      style={{
+                        fontFamily: "'Inter', sans-serif", fontSize: 12, cursor: "text",
+                        padding: "5px 10px", borderRadius: 20, width: 150,
+                        border: speakerMap[rawLabel] ? `1px solid ${sector.accent}` : `1px solid ${BORDER}`,
+                        background: speakerMap[rawLabel] ? `${sector.accent}25` : CHARCOAL,
+                        color: TXT, outline: "none",
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>

@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
-import { AudioLines, Sparkles, Loader2, Smile, Meh, Frown, ListChecks, AlertOctagon, Eraser, RotateCcw, Tag, Mic, Square } from "lucide-react";
+import { AudioLines, Sparkles, Loader2, Smile, Meh, Frown, ListChecks, AlertOctagon, Eraser, RotateCcw, Tag, Mic, Square, Users } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // DESIGN TOKENS — third identity in the portfolio family: a "studio
@@ -190,51 +190,41 @@ export default function CallIntelligence() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [micSupported, setMicSupported] = useState(true);
-  const recognitionRef = useRef(null);
-  const baseTranscriptRef = useRef("");
+  const [detectedSpeakers, setDetectedSpeakers] = useState([]);
+  const [speakerMap, setSpeakerMap] = useState({});
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const streamRef = useRef(null);
 
   useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
       setMicSupported(false);
-      return;
     }
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "en-US";
-
-    recognition.onresult = (event) => {
-      let finalChunk = "";
-      let interimChunk = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const text = event.results[i][0].transcript;
-        if (event.results[i].isFinal) finalChunk += text + " ";
-        else interimChunk += text;
-      }
-      if (finalChunk) baseTranscriptRef.current += finalChunk;
-      setTranscript((baseTranscriptRef.current + interimChunk).trim());
-    };
-
-    recognition.onerror = () => {
-      setIsRecording(false);
-    };
-
-    recognition.onend = () => {
-      setIsRecording(false);
-    };
-
-    recognitionRef.current = recognition;
   }, []);
 
-  function startRecording() {
-    if (!recognitionRef.current) return;
-    baseTranscriptRef.current = transcript ? transcript + " " : "";
+  async function startRecording() {
     setAnalysis(null);
     setError(null);
+    setDetectedSpeakers([]);
+    setSpeakerMap({});
     try {
-      recognitionRef.current.start();
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+        ? "audio/mp4"
+        : "";
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => handleRecordingStop(recorder.mimeType || mimeType || "audio/webm");
+      mediaRecorderRef.current = recorder;
+      recorder.start();
       setIsRecording(true);
     } catch (e) {
       setError("Couldn't access the microphone. Check your browser's mic permissions for this site.");
@@ -242,9 +232,49 @@ export default function CallIntelligence() {
   }
 
   function stopRecording() {
-    if (!recognitionRef.current) return;
-    recognitionRef.current.stop();
-    setIsRecording(false);
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+      setIsRecording(false);
+    }
+  }
+
+  async function handleRecordingStop(mimeType) {
+    setIsTranscribing(true);
+    setError(null);
+    try {
+      const blob = new Blob(audioChunksRef.current, { type: mimeType });
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+
+      const response = await fetch("/api/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audioBase64: base64, mimeType }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Transcription failed");
+
+      setTranscript(data.formattedTranscript);
+      setDetectedSpeakers(data.speakers || []);
+    } catch (e) {
+      setError(e.message || "Transcription failed. Try recording again.");
+    } finally {
+      setIsTranscribing(false);
+    }
+  }
+
+  function relabelSpeaker(rawLabel, newName) {
+    const updatedMap = { ...speakerMap, [rawLabel]: newName };
+    setSpeakerMap(updatedMap);
+    setTranscript((prev) => {
+      const pattern = new RegExp(`^${rawLabel}:`, "gm");
+      return prev.replace(pattern, `${newName}:`);
+    });
   }
 
   const sector = SECTORS[sectorKey];
@@ -269,6 +299,8 @@ export default function CallIntelligence() {
 
   function handleClear() {
     setTranscript("");
+    setDetectedSpeakers([]);
+    setSpeakerMap({});
     setAnalysis(null);
     setError(null);
   }
@@ -302,18 +334,14 @@ Account: ${account.name} (${account.tier} tier, ${sector.label})
 Transcript:
 ${transcript}`;
 
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
+      const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          messages: [{ role: "user", content: prompt }],
-        }),
+        body: JSON.stringify({ prompt }),
       });
-      if (!response.ok) throw new Error("API not reachable outside Claude.ai");
+      if (!response.ok) throw new Error("API not reachable");
       const data = await response.json();
-      const text = data.content.map((b) => b.text || "").join("\n");
+      const text = data.text;
       const clean = text.replace(/```json|```/g, "").trim();
       const parsed = JSON.parse(clean);
       setAnalysis(parsed);
@@ -322,7 +350,7 @@ ${transcript}`;
       if (fallback && transcript.trim() === account.transcript.trim()) {
         setAnalysis({ ...fallback, isFallback: true });
       } else {
-        setError("Live generation isn't available outside Claude.ai for custom transcripts. Open this project inside Claude.ai to see it generated live.");
+        setError("Couldn't generate the analysis right now. Check your connection and try again.");
       }
     } finally {
       setLoading(false);
@@ -436,24 +464,54 @@ ${transcript}`;
             {micSupported ? (
               <button
                 onClick={isRecording ? stopRecording : startRecording}
+                disabled={isTranscribing}
                 style={{
                   display: "flex", alignItems: "center", gap: 8,
                   background: isRecording ? NEGATIVE : "transparent",
                   color: isRecording ? "#1A1A18" : TXT,
                   border: isRecording ? "none" : `1px solid ${BORDER}`,
                   borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 600,
-                  cursor: "pointer", fontFamily: "'Inter', sans-serif",
+                  cursor: isTranscribing ? "default" : "pointer", fontFamily: "'Inter', sans-serif",
+                  opacity: isTranscribing ? 0.6 : 1,
                 }}
               >
-                {isRecording ? <Square size={14} /> : <Mic size={14} />}
-                {isRecording ? "Stop recording" : "Record live"}
+                {isTranscribing ? <Loader2 size={14} className="spin" /> : isRecording ? <Square size={14} /> : <Mic size={14} />}
+                {isTranscribing ? "Transcribing & identifying speakers…" : isRecording ? "Stop recording" : "Record live"}
               </button>
             ) : (
               <div style={{ fontFamily: "'Inter', sans-serif", fontSize: 11, color: MUTED, display: "flex", alignItems: "center" }}>
-                Live recording needs Chrome or Edge.
+                Live recording needs microphone access — check your browser settings.
               </div>
             )}
           </div>
+
+          {detectedSpeakers.length > 0 && (
+            <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 5, fontFamily: "'Inter', sans-serif", fontSize: 11, color: MUTED }}>
+                <Users size={13} /> {detectedSpeakers.length} speaker{detectedSpeakers.length > 1 ? "s" : ""} detected — label them:
+              </span>
+              {detectedSpeakers.map((rawLabel) => (
+                <div key={rawLabel} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: MUTED }}>{rawLabel}:</span>
+                  {["CSM", "Client"].map((name) => (
+                    <button
+                      key={name}
+                      onClick={() => relabelSpeaker(rawLabel, name)}
+                      style={{
+                        fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                        padding: "4px 10px", borderRadius: 20,
+                        border: speakerMap[rawLabel] === name ? `1px solid ${sector.accent}` : `1px solid ${BORDER}`,
+                        background: speakerMap[rawLabel] === name ? `${sector.accent}25` : "transparent",
+                        color: speakerMap[rawLabel] === name ? TXT : MUTED,
+                      }}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {error && <div style={{ fontFamily: "'Inter', sans-serif", fontSize: 13, color: NEGATIVE, marginBottom: 20 }}>{error}</div>}
